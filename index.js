@@ -1,10 +1,11 @@
-// index.js - WhatsApp Bot Financeiro
+// index.js - WhatsApp Bot Simplificado
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys')
 const { Boom } = require('@hapi/boom')
 const express = require('express')
 const fs = require('fs')
-const path = require('path')
 const qrcode = require('qrcode')
+const https = require('https')
+const http = require('http')
 
 const app = express()
 app.use(express.json())
@@ -17,6 +18,33 @@ let sock = null
 let qrCodeData = null
 let connectionStatus = 'disconnected'
 
+// Função para fazer HTTP request sem node-fetch
+function sendToN8N(data) {
+    return new Promise((resolve, reject) => {
+        const url = new URL(N8N_WEBHOOK_URL)
+        const options = {
+            hostname: url.hostname,
+            port: url.port || (url.protocol === 'https:' ? 443 : 80),
+            path: url.pathname + url.search,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(JSON.stringify(data))
+            }
+        }
+
+        const req = (url.protocol === 'https:' ? https : http).request(options, (res) => {
+            let body = ''
+            res.on('data', chunk => body += chunk)
+            res.on('end', () => resolve({ status: res.statusCode, body }))
+        })
+
+        req.on('error', reject)
+        req.write(JSON.stringify(data))
+        req.end()
+    })
+}
+
 // Função para conectar WhatsApp
 async function connectWhatsApp() {
     try {
@@ -24,32 +52,35 @@ async function connectWhatsApp() {
         
         sock = makeWASocket({
             auth: state,
-            printQRInTerminal: false, // Não mostrar no terminal
+            printQRInTerminal: false,
             defaultQueryTimeoutMs: 60000,
         })
 
-        // Salvar credenciais quando atualizadas
         sock.ev.on('creds.update', saveCreds)
 
-        // QR Code para conectar
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update
             
             if (qr) {
-                console.log('📱 QR Code gerado! Acesse http://localhost:3002 para escanear')
-                
-                // Gerar QR Code como imagem
+                console.log('📱 QR Code gerado!')
                 qrCodeData = await qrcode.toDataURL(qr)
-                
-                // Salvar QR como arquivo também
-                const qrPath = './qr-codes/whatsapp-qr.png'
-                await qrcode.toFile(qrPath, qr)
-                
                 connectionStatus = 'qr_ready'
+                
+                // Salvar QR como arquivo
+                try {
+                    if (!fs.existsSync('./qr-codes')) {
+                        fs.mkdirSync('./qr-codes', { recursive: true })
+                    }
+                    await qrcode.toFile('./qr-codes/whatsapp-qr.png', qr)
+                } catch (err) {
+                    console.log('Erro ao salvar QR:', err.message)
+                }
             }
             
             if (connection === 'close') {
-                const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut
+                const shouldReconnect = (lastDisconnect?.error instanceof Boom) ? 
+                    lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut : true
+                
                 console.log('⚠️ Conexão fechada. Reconectando...', shouldReconnect)
                 connectionStatus = 'disconnected'
                 
@@ -57,18 +88,17 @@ async function connectWhatsApp() {
                     setTimeout(connectWhatsApp, 3000)
                 }
             } else if (connection === 'open') {
-                console.log('✅ WhatsApp conectado com sucesso!')
+                console.log('✅ WhatsApp conectado!')
                 connectionStatus = 'connected'
-                qrCodeData = null // Limpar QR após conexão
+                qrCodeData = null
             }
         })
 
-        // Receber mensagens
         sock.ev.on('messages.upsert', async ({ messages, type }) => {
             if (type !== 'notify') return
             
             for (const message of messages) {
-                if (message.key.fromMe) continue // Ignorar mensagens próprias
+                if (message.key.fromMe) continue
                 
                 const messageData = {
                     id: message.key.id,
@@ -77,64 +107,44 @@ async function connectWhatsApp() {
                     body: extractMessageText(message),
                     timestamp: message.messageTimestamp,
                     messageType: getMessageType(message),
-                    isGroup: message.key.remoteJid?.includes('@g.us'),
-                    mediaUrl: await extractMediaUrl(message)
+                    isGroup: message.key.remoteJid?.includes('@g.us') || false
                 }
                 
-                console.log('📨 Mensagem recebida:', messageData.fromName, ':', messageData.body)
+                console.log('📨 Mensagem:', messageData.fromName, ':', messageData.body)
                 
-                // Enviar para N8N
                 try {
-                    await fetch(N8N_WEBHOOK_URL, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(messageData)
-                    })
+                    await sendToN8N(messageData)
+                    console.log('✅ Enviado para N8N')
                 } catch (error) {
-                    console.error('❌ Erro ao enviar para N8N:', error.message)
+                    console.error('❌ Erro N8N:', error.message)
                 }
             }
         })
 
     } catch (error) {
-        console.error('❌ Erro ao conectar WhatsApp:', error)
+        console.error('❌ Erro conexão:', error.message)
         connectionStatus = 'error'
         setTimeout(connectWhatsApp, 5000)
     }
 }
 
-// Extrair texto da mensagem
 function extractMessageText(message) {
     return message.message?.conversation ||
            message.message?.extendedTextMessage?.text ||
            message.message?.imageMessage?.caption ||
-           message.message?.videoMessage?.caption ||
            message.message?.audioMessage ? '[ÁUDIO]' :
            message.message?.imageMessage ? '[IMAGEM]' :
-           message.message?.videoMessage ? '[VÍDEO]' :
-           message.message?.documentMessage ? '[DOCUMENTO]' :
-           '[MENSAGEM NÃO SUPORTADA]'
+           '[OUTRO]'
 }
 
-// Identificar tipo da mensagem
 function getMessageType(message) {
     if (message.message?.conversation || message.message?.extendedTextMessage) return 'text'
     if (message.message?.imageMessage) return 'image'
     if (message.message?.audioMessage) return 'audio'
-    if (message.message?.videoMessage) return 'video'
-    if (message.message?.documentMessage) return 'document'
-    return 'unknown'
-}
-
-// Extrair URL de mídia (se necessário)
-async function extractMediaUrl(message) {
-    // Para implementar depois se precisar baixar mídias
-    return null
+    return 'other'
 }
 
 // API Endpoints
-
-// Status da conexão
 app.get('/status', (req, res) => {
     res.json({
         status: connectionStatus,
@@ -144,7 +154,6 @@ app.get('/status', (req, res) => {
     })
 })
 
-// QR Code
 app.get('/qr', (req, res) => {
     if (qrCodeData) {
         res.json({ qr: qrCodeData })
@@ -153,7 +162,6 @@ app.get('/qr', (req, res) => {
     }
 })
 
-// Enviar mensagem
 app.post('/send', async (req, res) => {
     try {
         const { to, message } = req.body
@@ -162,35 +170,30 @@ app.post('/send', async (req, res) => {
             return res.status(400).json({ error: 'WhatsApp não conectado' })
         }
         
-        // Formatar número (adicionar @s.whatsapp.net se necessário)
         const formattedNumber = to.includes('@') ? to : `${to}@s.whatsapp.net`
-        
         await sock.sendMessage(formattedNumber, { text: message })
         
-        console.log('📤 Mensagem enviada para:', to)
-        res.json({ success: true, message: 'Mensagem enviada com sucesso' })
+        console.log('📤 Enviado para:', to)
+        res.json({ success: true })
         
     } catch (error) {
-        console.error('❌ Erro ao enviar mensagem:', error)
+        console.error('❌ Erro envio:', error.message)
         res.status(500).json({ error: error.message })
     }
 })
 
-// Restart conexão
 app.post('/restart', async (req, res) => {
     try {
-        if (sock) {
-            sock.end()
-        }
+        if (sock) sock.end()
         connectionStatus = 'restarting'
         setTimeout(connectWhatsApp, 2000)
-        res.json({ success: true, message: 'Reiniciando conexão...' })
+        res.json({ success: true })
     } catch (error) {
         res.status(500).json({ error: error.message })
     }
 })
 
-// Criar diretórios necessários
+// Criar diretórios
 const dirs = ['./sessions', './qr-codes']
 dirs.forEach(dir => {
     if (!fs.existsSync(dir)) {
@@ -198,22 +201,13 @@ dirs.forEach(dir => {
     }
 })
 
-// Iniciar servidor
 app.listen(PORT, () => {
-    console.log(`🚀 Bot servidor rodando na porta ${PORT}`)
-    console.log(`📊 Status: http://localhost:${PORT}/status`)
-    console.log(`📱 QR Code: http://localhost:${PORT}/qr`)
-    console.log(`📤 Enviar: POST http://localhost:${PORT}/send`)
-    
-    // Conectar WhatsApp
+    console.log(`🚀 Bot rodando na porta ${PORT}`)
     connectWhatsApp()
 })
 
-// Graceful shutdown
 process.on('SIGINT', () => {
-    console.log('🛑 Encerrando bot...')
-    if (sock) {
-        sock.end()
-    }
+    console.log('🛑 Encerrando...')
+    if (sock) sock.end()
     process.exit(0)
 })
