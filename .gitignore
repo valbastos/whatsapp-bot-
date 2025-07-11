@@ -1,0 +1,7 @@
+# .gitignore
+node_modules/
+sessions/
+qr-codes/
+npm-debug.log*
+.env
+.DS_Store
