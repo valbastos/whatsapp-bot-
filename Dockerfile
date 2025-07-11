@@ -1,32 +1,28 @@
-FROM node:18-alpine
+FROM node:18-bullseye-slim
 
 WORKDIR /app
 
-# Instalar dependências do sistema para compilar algumas libs
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y \
     python3 \
-    make \
-    g++ \
-    cairo-dev \
-    jpeg-dev \
-    pango-dev \
-    musl-dev \
-    giflib-dev \
-    pixman-dev \
-    pangomm-dev \
-    libjpeg-turbo-dev \
-    freetype-dev
+    build-essential \
+    libc6-dev \
+    libcairo2-dev \
+    libpango1.0-dev \
+    libjpeg-dev \
+    libgif-dev \
+    librsvg2-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copiar package.json
 COPY package.json ./
-RUN npm install
+RUN npm install --unsafe-perm --allow-root
 
-# Copiar código
 COPY index.js ./
-
-# Criar diretórios necessários
 RUN mkdir -p sessions qr-codes
 
-EXPOSE 3001
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 nodejs && \
+    chown -R nodejs:nodejs /app
 
+USER nodejs
+EXPOSE 3001
 CMD ["node", "index.js"]
