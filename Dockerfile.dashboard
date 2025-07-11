@@ -1,16 +1,11 @@
-# Dockerfile.dashboard (para o dashboard)
-FROM node:18-alpine
+FROM node:18-bullseye-slim
 
 WORKDIR /app
 
-# Instalar dependências mínimas
 RUN npm init -y && npm install express
 
-# Copiar código do dashboard
 COPY dashboard.js ./
 
 EXPOSE 3002
 
 CMD ["node", "dashboard.js"]
-
----
