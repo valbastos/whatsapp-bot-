@@ -1,4 +1,3 @@
-# Dockerfile (para o bot principal)
 FROM node:18-alpine
 
 WORKDIR /app
@@ -17,3 +16,17 @@ RUN apk add --no-cache \
     pangomm-dev \
     libjpeg-turbo-dev \
     freetype-dev
+
+# Copiar package.json
+COPY package.json ./
+RUN npm install
+
+# Copiar código
+COPY index.js ./
+
+# Criar diretórios necessários
+RUN mkdir -p sessions qr-codes
+
+EXPOSE 3001
+
+CMD ["node", "index.js"]
